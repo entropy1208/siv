@@ -1,0 +1,260 @@
+#! /usr/bin/env python
+# -*- coding: utf-8 -*-
+# vim:fenc=utf-8
+#
+# Copyright © 2017 entro <entropy1208@yahoo.co.in>
+#
+# Distributed under terms of the MIT license.
+
+import os
+import time
+import sys
+import argparse
+import grp
+import csv
+import hashlib
+import pwd
+
+
+from custom_walk import walk
+
+
+def get_attrs(attr_dict, path, attrs):
+    if os.path.exists(path):
+        stat_obj = os.stat(path)
+        for attr in attrs:
+            if attr == 'size':
+                attr_dict['size'] = str(stat_obj.st_size)
+            elif attr == 'owner_usr':
+                attr_dict['owner_usr'] = str(pwd.getpwuid(stat_obj.st_uid).pw_name)
+            elif attr == 'owner_grp':
+                attr_dict['owner_grp'] = str(grp.getgrgid(stat_obj.st_gid).gr_name)
+            elif attr == 'last_modification_time':
+                attr_dict['last_modification_time'] = str(stat_obj.st_mtime)
+            elif attr == 'access_rights':
+                attr_dict['access_rights'] = str(oct(stat_obj.st_mode & 0777)[1:])
+        return attr_dict
+    else:
+        sys.exit("Incorrect specified path!")
+
+
+parser = argparse.ArgumentParser(description='A simple system integrity verifier',
+                                 prog='siv', add_help=True)
+group = parser.add_mutually_exclusive_group(required=True)
+group.add_argument('-i', action="store_const",
+                   const="-i", dest="mode",
+                   help="Initialization mode: ie. siv -i -D important_directory -V	verificationDB -R my_report.txt	-H sha1")
+group.add_argument('-v', action="store_const",
+                   const="-v", dest="mode",
+                   help="Verification mode: ie. siv -v -D important_directory -V verificationDB -R my_report2.txt")
+parser.add_argument('-D', action="store", dest="monitored_directory", nargs=1, required=True,
+                    help="Use absolute path. ie - /home/entro/courses")
+parser.add_argument('-V', action="store", dest="verification_file", nargs=1, required=True,
+                    help="Same as above. ie - /home/entro/test.txt")
+parser.add_argument('-R', action="store", dest="report_file", nargs=1, required=True,
+                    help="Same as above. ie - /home/entro/report.txt")
+parser.add_argument('-H', action="store", dest="hash_func", nargs=1,
+                    help="A hash function - either SHA('sha1') or MD5('md5'): ie. 'sha1' or 'md5' as flag value")
+args = parser.parse_args()
+mode = args.mode
+monitored_directory = args.monitored_directory[0]
+verification_file = args.verification_file[0]
+report_file = args.report_file[0]
+if mode == '-i':
+    if args.hash_func is None:
+        sys.exit("-H is required!")
+    hash_func = args.hash_func[0]
+    if hash_func not in ['sha1', 'md5']:
+        parser.error("-H should be 'sha1' or 'md5'!")
+    else:
+        if not os.path.isdir(monitored_directory):
+            sys.exit("The specified directory does not exists!")
+        else:
+            monitored_directory_tree = walk(monitored_directory, 3)
+            monitored_directory_files = [os.path.join(root, name) for root,
+                    dirs, files in monitored_directory_tree for name in files]
+            if not verification_file in monitored_directory_files \
+                and not report_file in monitored_directory_files:
+                if os.path.isfile(verification_file) \
+                     and os.path.isfile(report_file):
+                    while True:
+                        ans = raw_input("Do you want to overwrite the existing files?: ")
+                        if ans == "no":
+                            sys.exit("Terminating the program!")
+                        elif ans == "yes":
+                            break
+                if not os.path.isfile(verification_file):
+                    open(verification_file, 'a').close()
+                if not os.path.isfile(report_file):
+                    open(report_file, 'a').close()
+                hash_func = hashlib.md5 if hash_func == 'md5' else hashlib.sha1
+                start = time.clock()
+                verification_file_obj = open(verification_file, "wt")
+                fieldnames = ('abs_path', 'size', 'owner_usr',
+                              'owner_grp', 'last_modification_time',
+                              'access_rights', 'hash')
+                writer = csv.DictWriter(verification_file_obj, fieldnames=fieldnames)
+                headers = dict((n, n) for n in fieldnames)
+                writer.writerow(headers)
+                numDirs, numFiles = (0, 0)
+                attrs = ['owner_usr', 'owner_grp', 'last_modification_time', 'access_rights']
+                for root, dirs, files in walk(monitored_directory, 3):
+                    dir_attrs = dict()
+                    dir_attrs['abs_path'] = root
+                    get_attrs(dir_attrs, root, attrs)
+                    writer.writerow(dir_attrs)
+                    for filename in files:
+                        file_attrs = dict()
+                        file_attrs['abs_path'] = \
+                                os.path.join(root, filename)
+                        get_attrs(file_attrs, file_attrs['abs_path'], list(attrs + ['size', ]))
+                        try:
+                            readfile = open(file_attrs['abs_path'], "rt")
+                            content = readfile.read()
+                            file_attrs['hash'] = \
+                                hash_func(content).hexdigest()
+                        finally:
+                            readfile.close()
+                        writer.writerow(file_attrs)
+                        numFiles += 1
+                    numDirs += 1
+                verification_file_obj.close()
+                end = time.clock() - start
+                report_file = open(report_file, 'wt')
+                fieldnames = ('monitored_directory_path',
+                              'verification_file_path',
+                              'numDirs',
+                              'numFiles',
+                              'init_time')
+                writer = csv.DictWriter(report_file,
+                                        fieldnames)
+                headers = dict((n,n) for n in fieldnames)
+                writer.writerow(headers)
+                hash_func = 'sha1' if hash_func == hashlib.sha1 else 'md5'
+                summary = {'monitored_directory_path': os.path.abspath(monitored_directory),
+                           'verification_file_path': os.path.abspath(verification_file),
+                           'numDirs': numDirs,
+                           'numFiles': numFiles,
+                           'init_time': end,
+                          }
+                writer.writerow(summary)
+                report_file.close()
+            else:
+                sys.exit("The verification file and/or the report file exists within the monitored directory! Please check it!")
+elif mode == '-v':
+    if args.hash_func is not None:
+        parser.error("-H and -V are not allowed together! They are mutually exclusive!")
+    else:
+        if not os.path.isdir(monitored_directory):
+            sys.exit("The specified directory does not exists!")
+        if not os.path.isfile(verification_file):
+            sys.exit("The specified verification file does not exists!")
+        else:
+            monitored_directory_tree = walk(monitored_directory, 3)
+            monitored_directory_files = [os.path.join(root, name) for root,
+                                         dirs, files in monitored_directory_tree for name in files]
+            if not verification_file in monitored_directory_files \
+                and not report_file in monitored_directory_files:
+                if not os.path.isfile(report_file):
+                    open(report_file, 'a').close()
+                start = time.clock()
+                verification_file_obj = open(verification_file, 'rt')
+                reader = csv.DictReader(verification_file_obj)
+                verification_file_dict = {}
+                for row in reader:
+                    path = row.pop('abs_path')
+                    if path not in verification_file_dict:
+                        verification_file_dict[path] = {}
+                        for key in row:
+                            verification_file_dict[path][key] = row[key]
+                verification_file_obj.close()
+                hash_func = None
+                for path in verification_file_dict:
+                    if os.path.exists(path):
+                        if os.path.isfile(path):
+                            readfile = open(path, "rt")
+                            file_content = readfile.read()
+                            sample_hash = verification_file_dict[path]['hash']
+                            if hashlib.md5(file_content).hexdigest() == sample_hash:
+                                hash_func = hashlib.md5
+                            elif hashlib.sha1(file_content).hexdigest() == sample_hash:
+                                hash_func = hashlib.sha1
+                            break
+                report_file_obj = open(report_file, 'wt')
+                headers = ('size', 'owner_usr', 'owner_grp', 'last_modification_time',
+                           'access_rights', 'hash')
+                numDirs, numFiles, numWarnings = (0, 0, 0)
+                attrs = ['owner_usr', 'owner_grp', 'last_modification_time', 'access_rights']
+                for root, dirs, files in walk(monitored_directory, 3):
+                    warning = 'Warning! : %s has changed!' % root
+                    if root in verification_file_dict:
+                        verify_dir_attrs = verification_file_dict.pop(root)
+                        dir_attrs = dict()
+                        get_attrs(dir_attrs, root, attrs)
+                        for header in ('owner_usr', 'owner_grp', 'last_modification_time', 'access_rights'):
+                            if verify_dir_attrs[header] != dir_attrs[header]:
+                                warning += ' ' + str(header) + ','
+                        if warning != 'Warning! : %s has changed!' % root:
+                            warning += ' are different!\n'
+                            report_file_obj.write(warning)
+                            numWarnings += 1
+                    else:
+                        report_file_obj.write("New directory! : %s\n" % root)
+                        numWarnings += 1
+                    for filename in files:
+                        warning = 'Warning! : %s has changed!' % filename
+                        path = os.path.join(root, filename)
+                        if path in verification_file_dict:
+                            file1_attrs = verification_file_dict.pop(path)
+                            file_attrs = {}
+                            file_attrs['abs_path'] = \
+                                os.path.join(root, filename)
+                            get_attrs(file_attrs, file_attrs['abs_path'], list(attrs + ['size', ]))
+                            readfile = open(file_attrs['abs_path'], "rt")
+                            file_content = readfile.read()
+                            file_attrs['hash'] = \
+                                hash_func(file_content).hexdigest()
+                            readfile.close()
+                            warning = 'Warning! : %s has changed!' % filename
+                            for header in headers:
+                                if file1_attrs[header] != file_attrs[header]:
+                                        warning += ' ' + str(header) + ','
+                            if warning != 'Warning! : %s has changed!' % filename:
+                                warning += ' are different!\n'
+                                report_file_obj.write(warning)
+                                numWarnings += 1
+                        else:
+                            report_file_obj.write('%s is a new file!\n' % filename)
+                            numWarnings += 1
+                        numFiles += 1
+                    numDirs += 1
+                removed_dirs, removed_files = ([], [])
+                for path in verification_file_dict:
+                    if not '.' in path.split('/')[-1]:
+                        removed_dirs.append(path)
+                    else:
+                        removed_files.append(path)
+                report_file_obj.write("The following are deleted directories : \n")
+                for dir_name in removed_dirs:
+                    report_file_obj.write(dir_name)
+                    report_file_obj.write('\n')
+                    numWarnings += 1
+                report_file_obj.write("The following are deleted files : \n")
+                for file_name in removed_files:
+                    report_file_obj.write(file_name)
+                    report_file_obj.write('\n')
+                    numWarnings += 1
+                end = time.clock() - start
+                summary = {'path': os.path.abspath(monitored_directory),
+                           'verification_file': os.path.abspath(verification_file),
+                           'report_file': os.path.abspath(report_file),
+                           'numDirs': numDirs,
+                           'numFiles': numFiles,
+                           'numWarnings': numWarnings,
+                           'verification_time': end,
+                          }
+                report_file_obj.write(', '.join(str(key) for key in summary) + '\n')
+                report_file_obj.write(', '.join(str(summary[key]) for key in summary) + '\n')
+                report_file_obj.close()
+            else:
+                sys.exit("The verification file and/or the report file exists within the monitored directory! Please check it!")
