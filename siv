@@ -14,6 +14,7 @@ import grp
 import csv
 import hashlib
 import pwd
+import redis
 
 
 from custom_walk import walk
@@ -61,6 +62,7 @@ monitored_directory = args.monitored_directory[0]
 verification_file = args.verification_file[0]
 report_file = args.report_file[0]
 if mode == '-i':
+    start = time.clock()
     if args.hash_func is None:
         sys.exit("-H is required!")
     hash_func = args.hash_func[0]
@@ -76,9 +78,9 @@ if mode == '-i':
             if not verification_file in monitored_directory_files \
                 and not report_file in monitored_directory_files:
                 if os.path.isfile(verification_file) \
-                     and os.path.isfile(report_file):
+                     or os.path.isfile(report_file):
                     while True:
-                        ans = raw_input("Do you want to overwrite the existing files?: ")
+                        ans = raw_input("Do you want to overwrite the existing file/s?: ")
                         if ans == "no":
                             sys.exit("Terminating the program!")
                         elif ans == "yes":
@@ -88,7 +90,6 @@ if mode == '-i':
                 if not os.path.isfile(report_file):
                     open(report_file, 'a').close()
                 hash_func = hashlib.md5 if hash_func == 'md5' else hashlib.sha1
-                start = time.clock()
                 verification_file_obj = open(verification_file, "wt")
                 fieldnames = ('abs_path', 'size', 'owner_usr',
                               'owner_grp', 'last_modification_time',
@@ -98,11 +99,19 @@ if mode == '-i':
                 writer.writerow(headers)
                 numDirs, numFiles = (0, 0)
                 attrs = ['owner_usr', 'owner_grp', 'last_modification_time', 'access_rights']
+                conn = redis.Redis(host='localhost', port=6379, db=0)
                 for root, dirs, files in walk(monitored_directory, 3):
                     dir_attrs = dict()
                     dir_attrs['abs_path'] = root
                     get_attrs(dir_attrs, root, attrs)
+                    print "Before: ", dir_attrs
                     writer.writerow(dir_attrs)
+                    path = dir_attrs.pop('abs_path', None)
+                    if path is not None:
+                        print path
+                        print "After: ", dir_attrs
+                        print conn.hmset(path, dir_attrs)
+                        print "Key Value:", conn.hgetall(path)
                     for filename in files:
                         file_attrs = dict()
                         file_attrs['abs_path'] = \
@@ -115,9 +124,17 @@ if mode == '-i':
                                 hash_func(content).hexdigest()
                         finally:
                             readfile.close()
+                        print "Before: ", file_attrs
                         writer.writerow(file_attrs)
+                        path = file_attrs.pop('abs_path', None)
+                        if path is not None:
+                            print path
+                            print "After: ", file_attrs
+                            print conn.hmset(path, file_attrs)
+                            print "Key Value:", conn.hgetall(path)
                         numFiles += 1
                     numDirs += 1
+                conn.save()
                 verification_file_obj.close()
                 end = time.clock() - start
                 report_file = open(report_file, 'wt')
@@ -142,6 +159,7 @@ if mode == '-i':
             else:
                 sys.exit("The verification file and/or the report file exists within the monitored directory! Please check it!")
 elif mode == '-v':
+    start = time.clock()
     if args.hash_func is not None:
         parser.error("-H and -V are not allowed together! They are mutually exclusive!")
     else:
@@ -157,7 +175,6 @@ elif mode == '-v':
                 and not report_file in monitored_directory_files:
                 if not os.path.isfile(report_file):
                     open(report_file, 'a').close()
-                start = time.clock()
                 verification_file_obj = open(verification_file, 'rt')
                 reader = csv.DictReader(verification_file_obj)
                 verification_file_dict = {}
@@ -185,10 +202,15 @@ elif mode == '-v':
                            'access_rights', 'hash')
                 numDirs, numFiles, numWarnings = (0, 0, 0)
                 attrs = ['owner_usr', 'owner_grp', 'last_modification_time', 'access_rights']
+                # conn = redis.Redis(host='localhost', port=6379, db=0)
                 for root, dirs, files in walk(monitored_directory, 3):
                     warning = 'Warning! : %s has changed!' % root
+                    # verify_dir_attrs = conn.hgetall(root)
+                    # print "From the redis store: ", verify_dir_attrs
+                    # verify_dir_attrs.pop('abs_path')
                     if root in verification_file_dict:
                         verify_dir_attrs = verification_file_dict.pop(root)
+                        print "After popping!: ", verify_dir_attrs
                         dir_attrs = dict()
                         get_attrs(dir_attrs, root, attrs)
                         for header in ('owner_usr', 'owner_grp', 'last_modification_time', 'access_rights'):
@@ -204,8 +226,13 @@ elif mode == '-v':
                     for filename in files:
                         warning = 'Warning! : %s has changed!' % filename
                         path = os.path.join(root, filename)
+                        # file1_attrs = conn.hgetall(path)
+                        # print "From the redis store: ", file1_attrs
+                        # file1_attrs.pop('abs_path')
                         if path in verification_file_dict:
                             file1_attrs = verification_file_dict.pop(path)
+                            print "From the verification file: ", file1_attrs
+                            print "After popping!: ", file1_attrs
                             file_attrs = {}
                             file_attrs['abs_path'] = \
                                 os.path.join(root, filename)
